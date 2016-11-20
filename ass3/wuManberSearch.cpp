@@ -2,13 +2,14 @@
 #include <vector>
 #include <string>
 #include <string.h>
-#include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <map>
 #include <ctype.h>
 #include <queue>
 #include <cctype>
+#include <sys/stat.h>
+#include <unordered_map>
 
 //Windows
 //#include<io.h>
@@ -16,20 +17,29 @@
 #include <unistd.h>
 #include <dirent.h>
 
-//typedef pair<string, float> PAIR;
 using namespace std;
 
-//typedef pair<string, float> PAIR;
-//
-//struct cmp {
-//    bool operator() (const PAIR &P1, const PAIR &P2)
-//    {
-//        return P1.second > P2.second;
-//    }
-//};
+// the struct is used as element to build the prefix table during preprocessing before Wu Manber Search
+typedef struct node {
+    unsigned short prefixHash;  // prefix hash value
+    string pattern;               // pattern string
+    node *pNodeNext;              // next node pointer
+} PNode, *PrefixNode;
 
-map<int, int> **statShawn;
-map<int, int> **statHarry;
+int block;                        // refer to Wu Manber algorithm, it is always 2 or 3 bytes, here choose 2
+int shortestLen;                  // the shortest length of search pattern(s)
+unsigned char *shiftArray;
+PrefixNode *prefixArray;           // used to match prefix first when the last two chars matched some pattern(s)
+int fileBlock = 6 * 1024 * 1024;  // segment the file to read to meet the memory requirement
+
+struct sortFreqDescendingAndFilenameAscending {
+    bool operator()( pair<float,string> &leftPair, pair<float,string> &rightPair) {
+        if( leftPair.first != rightPair.first )
+            return leftPair.first > rightPair.first;
+        else
+            return leftPair.second < rightPair.second;
+    }
+};
 
 //Windows
 //vector<string> getAllFilesWin( string path ) {
@@ -52,80 +62,34 @@ map<int, int> **statHarry;
 //}
 //Linux
 vector<string> getAllFilesLinux( string path ) {
-    vector<string> files;//store all filenames
-
-    DIR *dir;
-    struct dirent *ptr;
-
-    if ((dir=opendir(path.c_str())) == NULL) {
-        perror("Open dir error...");
-        exit(1);
+    vector<string> files; //store all filenames
+    DIR *directory;
+    struct dirent *dirPtr;
+    directory=opendir( path.c_str() );
+    while ((dirPtr=readdir(directory)) != NULL) {
+        if(strcmp(dirPtr->d_name,".")==0 || strcmp(dirPtr->d_name,"..")==0) continue;  //current dir or parrent dir
+        else if(dirPtr->d_type == 8)  files.push_back(dirPtr->d_name);   //file type
     }
+    closedir(directory);
 
-    while ((ptr=readdir(dir)) != NULL) {
-        if(strcmp(ptr->d_name,".")==0 || strcmp(ptr->d_name,"..")==0) continue;  //current dir or parrent dir
-        else if(ptr->d_type == 8)  files.push_back(ptr->d_name);   //file type
-    }
-    closedir(dir);
-
-    //sorting from small to large
+    //sorting from small to large alphabetically
     sort(files.begin(), files.end());
     return files;
 }
 
-map<string, map<int, vector<int> > > preprocFiles( vector<string> files, string path ){
-    map<string, map<int, vector<int> > > invertedIndex;
-    // { "hello": { ID1: [15, 87, 198,...], ID2: [4, 68] }
-    // { "harry": { ID1: [2,7,28,...], ID2: [49, 200, 463,...] }
-    int ch;
-    for( int fileIndex=0; fileIndex<files.size(); fileIndex++ ){
-        int count = 0;
-        int position = 0; bool alreadyStore = false;
-        //ifstream in;
-
-        // NOTE:
-        //in.open( (path + "\\\\" + files[ fileIndex ]).c_str() ); //transfer string to char*
-        //in.open( path + "\\" + files[fileIndex] );
-        FILE *pFile = fopen( (path+"/"+files[fileIndex]).c_str(), "r" );
-
-        string eachKeyword = "";
-        ch = fgetc( pFile );
-        while( ch != EOF ){
-        //while( !in.eof() ){
-            //in.read( &ch, 1 );
-            //if( ch == ' ' )
-            if( !((ch>=65&&ch<=90) || (ch>=97&&ch<=122)) ){  // ' ' or A-Z or a-z
-                if( eachKeyword != "" ){
-                    invertedIndex[ eachKeyword ][ fileIndex ].push_back( position );
-                }
-                alreadyStore = false; eachKeyword = ""; count += 1; ch = fgetc( pFile ); continue;
-            }
-
-            if( alreadyStore == false ) position = count;
-            alreadyStore = true;
-            eachKeyword += ch;
-            count += 1;
-
-            ch = fgetc( pFile );
-        }
-        if( eachKeyword != "" ){
-            invertedIndex[ eachKeyword ][ fileIndex ].push_back( position );
-        }
-
-        //in.close();
-        fclose( pFile );
-    }
-
-    return invertedIndex;
-}
-
-int getFileSize( FILE *pFile ) {
+int getFileSizeWindows( FILE *pFile ) {
     fseek(pFile,0,SEEK_END);
     int size = ftell(pFile);
+    rewind(pFile);
     return size;
 }
+int getFileSizeLinux( const char *filename ) {
+    struct stat statbuf;
+    stat( filename, &statbuf );
+    return statbuf.st_size;
+}
 
-
+/******************************************** unused now below *************************************************/
 int prefixToIndex( string prefixTwo ){
     char secondBit = prefixTwo[0] - 97;
     char firstBit = prefixTwo[1] - 97;
@@ -141,482 +105,171 @@ string indexToPrefix( int index ){
     prefixTwo += firstChar;
     return prefixTwo;
 }
+/******************************************** unused now above *************************************************/
 
-vector<int> sunday( int strLen, FILE *pFile, string searchStr, int* next ) {
-    vector<int> positions;
-    //int strLen = getFileSize( (pathname+"/"+fileName).c_str() );  // ??????
-    //int subLen = searchStr.length();
 
-//    int maxSize=256;
-//    int next[maxSize];
-    int i,j,pos;
-    int subLen = searchStr.length();
-//    for(i=0;i<maxSize;i++) next[i] = subLen+1;
-//    for(i=0;i<subLen;i++) next[ searchStr[i] ] = subLen-i;
-    pos=0;
-    char ch;
-    while(pos<=(strLen-subLen)) {
-        i = pos;
-        for( j=0; j<subLen; j++,i++ ) {
-            fseek( pFile, i, 0 ); ch = fgetc( pFile );
-            if( ch != searchStr[j] ) {
-                fseek( pFile, pos+subLen, 0 ); ch = fgetc( pFile );
-//                if( ch < 0 ) pos += subLen+1;   // used for non-ASCII character
-//                else pos += next[ ch ];         // move forward
-                pos += next[ ch ];         // move forward
-                break;
-            }
-        }
-        if( j == subLen){
-            //positions.push_back( pos );
-//            if( (pos+subLen) < strLen ){
-//                fseek( pFile, pos+subLen, 0 );
-              ch = fgetc( pFile );
-//                if( ch < 0 ) pos += subLen+1;   // used for non-ASCII character
-//                else pos += next[ ch ];         // move forward
-                pos += next[ ch ];         // move forward
-//            }
-//            else break;
-        }
-    }
-    return positions;
+void freeResources() {
+    delete[] shiftArray;
+    delete[] prefixArray;
 }
 
-//sunday algorithm combined with skip pointer
-vector<int> sundayWithSkipPointer( int fileSeq, int strLen, FILE *pFile, string searchStr, int* next ) {
-    vector<int> positions;
-
-    string preStr = searchStr.substr(0, 2);
-    int invertedIndex = prefixToIndex( preStr );
-    map<int, int> skipPointer = statHarry[ invertedIndex ][ fileSeq ];
-//    if( skipPointer.size() == 0 ) {
-//        return positions;               // if has no any from->to, then just return empty. since if it has any from->to, it at lease has 0->end
-//    }
-
-    int i,j,pos;
-    int subLen = searchStr.length();
-    pos=0;
-    char ch;
-    bool prefixExist = false;
-    int from, to = 0;
-    while(pos<=(strLen-subLen)) {
-        i = pos;
-
-        from = (skipPointer.begin())->first;
-        if( (from>=i ) && ( from<(i+subLen) ) ){
-            prefixExist = true;
-            to = (skipPointer.begin())->second;
-        }
-
-        for( j=0; j<subLen; j++,i++ ) {
-            fseek( pFile, i, 0 ); ch = fgetc( pFile );
-            if( ch != searchStr[j] ) {
-                if( prefixExist == true ){      //should skip, instead of next[ch] or (subLen+1)(non-ASCII)
-                    pos = to;                    //skip to next
-                    prefixExist = false;        //reset the flag
-                    skipPointer.erase( skipPointer.begin() ); //also erase the first item
-                }else{
-                    fseek( pFile, pos+subLen, 0 ); ch = fgetc( pFile );
-                    if( ch < 0 ) pos += subLen+1;   // used for non-ASCII character
-                    else pos += next[ ch ];         // move forward
-                }
-                break;   //break anyway
-            }
-        }
-
-        if( j == subLen){                       //if matches
-            positions.push_back( pos );
-            if( (pos+subLen) < strLen ){
-                if( prefixExist == true ){      //should skip, instead of (subLen+1)
-                    pos = to;                    //skip to next
-                    prefixExist = false;        //reset the flag
-                    skipPointer.erase( skipPointer.begin() ); //also erase the first item
-                }
-                else{
-                    fseek( pFile, pos+subLen, 0 ); ch = fgetc( pFile );
-                    if( ch < 0 ) pos += subLen+1;   // used for non-ASCII character
-                    else pos += next[ ch ];         // move forward
-                }
-            }
-            else break;  //terminate whole loop !
-        }
-    }
-    return positions;
+void InsertNode( unsigned short wordHash, string pattern, unsigned short prefixHash ) {
+    PrefixNode pNode = new PNode;
+    pNode->pattern = pattern;                   // whole pattern string
+    pNode->pNodeNext = prefixArray[wordHash];
+    pNode->prefixHash = prefixHash;             // hash value of the prefix
+    prefixArray[wordHash] = pNode;
 }
 
-void sundaySearch( vector<string> keywords, vector<string> files, string pathname ){
-    int fileNum = files.size();
-    int keywordNum = keywords.size();
-    int **nextArray = new int *[keywordNum];
-    int maxSize=256;
-    string keyword = ""; int subLen = 0;
-    for( int i=0; i<keywordNum; i++ ){
-        keyword = keywords[i];
-        subLen = keyword.length();
-        nextArray[i] = new int[maxSize];  //initialize to subLen+1
-        for( int j=0; j < maxSize; j++ ){
-            nextArray[i][j] = subLen+1;
-        }
-        for( int j=0; j < subLen; j++){
-            nextArray[i][ keyword[j] ] = subLen-j;
+void BuildShiftTable( vector<string> patterns ) {
+    shiftArray = new unsigned char[65536];  // use array to store, element is unsigned char type
+    prefixArray = new PrefixNode[65536];      // element is node struct pointer
+    // Shift array
+    //cout << shortestLen << endl;
+    for (int i = 0; i < 65536; i++) {
+        shiftArray[i] = shortestLen - 1;
+    }
+    // Hash table: initialize the shiftArray and prefixArray
+    memset( prefixArray, 0, 65536 * sizeof(prefixArray[0]) ); //prefixArray[0] is acutally the size of each PHONE struct !
+    for (unsigned int i = 0; i < patterns.size(); i++) {
+        for (int j = 0; j < shortestLen - block + 1; j++) {
+            // get every two consecutive chars before shortestLen for each search pattern and
+            // calculate their (shortest, if multiple exist) distance to the last char of shortestLen
+            unsigned short wordHash = *(unsigned short *) ( &patterns[i][shortestLen - 1 - j - 1] );
+            if (shiftArray[wordHash] > j) {
+                shiftArray[wordHash] = j;
+            }
+            // for each search pattern corresponding to last two chars before shortestLen,
+            // put it and its first 2 chars prefix into the prefixArray and form
+            // the linklist by its referencce to point to the next possible one if it exist in the array already
+            if ( j == 0 ) {
+                InsertNode(wordHash, patterns[i], *(unsigned short *) (&patterns[i][0]));
+            }
         }
     }
+}
 
-    FILE *pFile = NULL;
-    for( int i=0; i<fileNum; i++ ){
 
-        //combined with skip pointer
-//        bool noSearchPatter = false;
-//        for( int j=0; j<keywords.size(); j++ ){
-//            string preStr = keywords[j].substr(0, 2);
-//            int invertedIndex = prefixToIndex( preStr );
-//            map<int, int> skipPointer = statHarry[ invertedIndex ][ i ];
-//            if( skipPointer.size() == 0 ) {
-//                noSearchPatter = true; break;              // if has no any from->to, then just return empty. since if it has any from->to, it at lease has 0->end
-//            }
-//        }
-//        if( noSearchPatter == true ) continue;
 
-        /*****************************************************************/
-        //FILE *pFile = NULL;
-        pFile = fopen( (pathname+"/"+files[i]).c_str(),"rb" );
-        int fileSize = getFileSize( pFile );
+void wuManberSearch( vector<string> patterns, vector<string> files, string pathname, int patternNum ){
+    vector<pair<float, string> > items;
+    for( int i=0; i < files.size(); i++ ){
+        FILE *pFile = fopen( (pathname+"/"+files[i]).c_str(), "r" );
+        //int fileSize = getFileSizeWindows( pFile );
+        int fileSize = getFileSizeLinux( (pathname+"/"+files[i]).c_str() );
 
-        bool wordExist = true;
-        //pFile = fopen( (pathname+"/"+files[i]).c_str(), "r" );
-        float freq = 0.0;
-        for( int j=0; j<keywords.size(); j++ ){
+        float frequency = 0.0;
+        int offset = 0;
+        unordered_map<string, int> patternsMap;
+        int beginIndex = 0;
 
-            vector<int> positions = sunday( fileSize, pFile, keywords[j], nextArray[j] );                  //pure sunday algorithm
-//            //vector<int> positions = sundayWithSkipPointer( i, fileSize, pFile, keywords[j], nextArray[j] );  //sunday algorithm combined with skip pointer
+        char ch;
+        while( offset <= fileSize ){
+            char *buffer = (char*) malloc( sizeof(char)*(fileBlock+256) ); // used within wuManber
+            // segment the file and add 256 len bytes as offset to do the search for each segement
+            fread( buffer, 1, fileBlock+256, pFile );
+//          frequency = WuManber( fileSize, buffer, patterns, patternNum );
 
-//            int posSize = positions.size();
-//            if( posSize == 0 ){
-//                wordExist = false; break;
-//            }
-//            else freq += posSize;
-            //freq += posSize;   //looks like now it must have matches
+            // Do the Wu Manber search below
+            while ( beginIndex + (shortestLen - 1) < fileSize && beginIndex<offset+fileBlock ) {
+                //If the char is not whitespace or letters, than move M
+                //        ch = wholeBuffer[nBeginIdx+(shortestLen-1)];   //get the last char of tailing matching 2-letter characters
+                //        if( !((ch>=97 && ch<=122) || (ch>=65 && ch<=90) || ch==32) ){
+                //            nBeginIdx += shortestLen;  continue;
+                //        }
+                buffer[beginIndex+shortestLen-2 -offset] = tolower( buffer[beginIndex+shortestLen-2  -offset] );
+                buffer[beginIndex+shortestLen-1 -offset] = tolower( buffer[beginIndex+shortestLen-1  -offset] );
+                unsigned short wordHash = *(unsigned short *) &buffer[beginIndex+(shortestLen-1)-1  -offset];
+                if ( shiftArray[wordHash] != 0 ) {
+                    beginIndex += shiftArray[wordHash];  // try to move pattern(s) forward to shortest distance to match the text
+                }
+                else {
+                    PrefixNode pNode = prefixArray[wordHash];
+                    while (pNode) {    // iterate the linklist to try to totally match the pattern(s) by checking their prefix first
+                        buffer[beginIndex -offset] = tolower( buffer[beginIndex -offset] );
+                        buffer[beginIndex+1 -offset] = tolower( buffer[beginIndex+1 -offset] );
+                        //if any prefix matchs, then try to match the pattern from the 3rd char untill the end
+                        if ( pNode->prefixHash == *(unsigned short *) &buffer[beginIndex -offset] ) {
+                            int i = 2;
+                            ch = buffer[ beginIndex+i  -offset];
+                            while ( pNode->pattern[i] && beginIndex + i < fileSize && tolower(pNode->pattern[i]) == tolower(ch) ) {
+                                i++;
+                                ch = buffer[ beginIndex+i  -offset];
+                            }
+                            if (pNode->pattern[i] == 0) { //find a match here
+//                                printMatchInfo(nBeginIdx -offset, pNode->pattern);
+                                frequency += 1;
+                                patternsMap[ pNode->pattern ] = 1;
+                            }
+                        }
+                        pNode = pNode->pNodeNext;
+                    }
+                    beginIndex++;  //No matter find the pattern or not, both just increment the index by 1
+                }
+            }
+            free( buffer );
+            // Do the Wu Manber search above
+
+            offset += fileBlock;
+            beginIndex = offset;        // update the offset and nBeginIdx to search next segment content
+            fseek( pFile,offset,0 );
         }
 
-//        if( wordExist == true ){
-//            freq = freq / keywords.size();
-//            //stat[ files[i] ] = freq;
-//            //sortPos( files[i], freq, result ); currently unused
-//        }
+        //if find any pattern that has no match at all within the file, then no match
+        if( patternsMap.size() != patternNum ){
+            frequency = 0.0;
+        }else{
+            frequency = frequency / patternNum;
+        }
 
-        //cout << "keyword:" << keywords[0] << "; filename: " << files[i] << "; freq: " << freq << endl;
+        if( frequency == 0.0 ){
+            fclose(pFile);
+            continue;
+        }
+
+        items.push_back( make_pair(frequency, files[i]) );
         fclose(pFile);
     }
 
-    cout << "DONE!" << endl;
-
-    // Sort by value in map to output the result
-//    vector<PAIR> freqVector( stat.begin(), stat.end() );
-//    //转化为PAIR的vector
-//    sort( freqVector.begin(), freqVector.end(), cmp() );  //需要指定cmp
-//
-//    for( int i=0; i<=freqVector.size(); i++ ){
-//        cout << freqVector[i].first << " " << freqVector[i].second << endl;
-//    }  //也要按照vector的形式输出
-
-}
-
-vector<string> split(const string &text, char sep) {
-    vector<string> tokens;
-    size_t start = 0, end = 0;
-    while ((end = text.find(sep, start)) != std::string::npos) {
-        std::string temp = text.substr(start, end - start);
-        if (temp != "") tokens.push_back(temp);
-        start = end + 1;
+    // sort the files first according to their frequency; if frequency same, then sort them according to their filename alphabetically
+    sort( items.begin(), items.end(), sortFreqDescendingAndFilenameAscending() );
+    for (vector<pair<float,string> >::const_iterator iter = items.begin(); iter!= items.end(); iter++) {
+        //cout << iter->second << " : " << iter->first << endl;
+        cout << iter->second << endl;
     }
-    string temp = text.substr(start);
-    if (temp != "") tokens.push_back(temp);
-    return tokens;
+//    cout << "DONE!" << endl;
 }
-
-void skipPointerBuildShawn( vector<string> files, string pathName, int gap ){
-
-    //[ [{ from:to },{ from:to },{ from:to },...], [{ from:to },{ from:to },{ from:to },...], [{ from:to },{ from:to },{ from:to },...] ]
-    char ch;
-    int previousOffset[676] = { -1 };
-    for( int fileIndex=0; fileIndex<files.size(); fileIndex++ ){
-        int count = 0;
-        //ifstream in;
-        FILE *pFile = fopen( (pathName+"/"+files[fileIndex]).c_str(), "r" );
-
-        bool twoChar = false; char previous; string prefixTwo;
-        int prefixIndex, prevPrefexOffset = 0;
-        ch = fgetc( pFile );
-        while( ch != EOF ){
-            prefixTwo = "";
-
-            if( !((ch>=65&&ch<=90) || (ch>=97&&ch<=122)) ){  // ' ' or A-Z or a-z
-                twoChar = false;
-                count += 1;
-                ch = fgetc( pFile );
-                previous = -1;  //seems like useless
-                continue;
-            }
-
-            ch = tolower( ch );
-            if( twoChar == false ){
-                twoChar = true;
-                previous = ch;
-                count += 1;
-                ch = fgetc( pFile );
-                continue;
-            }
-
-            prefixTwo += previous;
-            prefixTwo += ch;
-            prefixIndex = prefixToIndex( prefixTwo );
-            prevPrefexOffset = previousOffset[prefixIndex];
-            if( ((count-1) - prevPrefexOffset) >= gap ){    //If the gap between this prefix string is larger than expected, than store from->to
-                statShawn[ fileIndex ][ prefixIndex ][ prevPrefexOffset ] = count - 1;
-            }
-            previousOffset[ prefixIndex ] = count - 1;
-
-            previous = ch;
-            count += 1;
-            ch = fgetc( pFile );
-        }
-
-        for( int k=0; k<676; k++ ){
-            prevPrefexOffset = previousOffset[ k ];
-            if( prevPrefexOffset != -1 ){
-                statShawn[ fileIndex ][ k ][ prevPrefexOffset ] = count - 1;  //keep track of skip pointer from previous to the end file offset
-            }
-        }
-
-        fclose( pFile );
-    }
-//    return invertedIndex;
-}
-
-void skipPointerBuildHarry( vector<string> files, string pathName, int gap ){
-    // [
-    //    aa: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    //    ab: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    //    ac: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    // ]
-    char ch;
-    for( int fileIndex=0; fileIndex<files.size(); fileIndex++ ){
-        int previousOffset[ 676 ] = { -1 };
-        int count = 0;
-        FILE *pFile = fopen( (pathName+"/"+files[fileIndex]).c_str(), "r" );
-
-        bool twoChar = false; char previous; string prefixTwo;
-        int prefixIndex, prevPrefexOffset = 0;
-        ch = fgetc( pFile );
-        while( ch != EOF ){
-            prefixTwo = "";
-
-            if( !((ch>=65&&ch<=90) || (ch>=97&&ch<=122)) ){  // ' ' or A-Z or a-z
-                twoChar = false;
-                count += 1;
-                ch = fgetc( pFile );
-                previous = -1;  //seems like useless
-                continue;
-            }
-
-            ch = tolower( ch );    //case insensitive
-            if( twoChar == false ){
-                twoChar = true;
-                previous = ch;
-                count += 1;
-                ch = fgetc( pFile );
-                continue;
-            }
-
-            prefixTwo += previous;
-            prefixTwo += ch;
-            prefixIndex = prefixToIndex( prefixTwo );
-            prevPrefexOffset = previousOffset[prefixIndex];
-            if( ((count-1) - prevPrefexOffset) >= gap ){    //If the gap between this prefix string is larger than expected, than store from->to
-                statHarry[ prefixIndex ][ fileIndex ][ prevPrefexOffset ] = count - 1;
-            }
-            previousOffset[ prefixIndex ] = count - 1;
-
-            previous = ch;
-            count += 1;
-            ch = fgetc( pFile );
-        }
-
-        for( int k=0; k<676; k++ ){
-            prevPrefexOffset = previousOffset[ k ];
-            if( prevPrefexOffset != -1 ){
-                statHarry[ k ][ fileIndex ][ prevPrefexOffset ] = count - 1;  //keep track of skip pointer from previous to the end file offset
-            }
-        }
-
-        fclose( pFile );
-    }
-//    return invertedIndex;
-}
-
-//int *getAllFileSize( vector<string> files, string pathName ){
-//    int *result = new int[files.size()]();
-//    for( int i=0; i<files.size(); i++ ){
-//        result[i] = getFileSize( (pathName+"/"+files[i]).c_str() );
-//    }
-//    return result;
-//}
-
-void skipPointerBuildModified( vector<string> files, string pathName, int gap ){
-    // [
-    //    aa: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    //    ab: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    //    ac: [ file1:{ from1:to1, from2:to2, from3:to3,... }, file2: { from1:to1, from2:to2, from3:to3,... } ]
-    // ]
-
-    // from:0000 0111  to:1202 3238
-    //int *fileSizeArray = getAllFileSize( files, pathName );
-
-
-    char ch;
-    for( int fileIndex=0; fileIndex<files.size(); fileIndex++ ){
-        int previousOffset[ 676 ] = { -1 };
-        int count = 0;
-        FILE *pFile = fopen( (pathName+"/"+files[fileIndex]).c_str(), "r" );
-
-        bool twoChar = false; char previous; string prefixTwo;
-        int prefixIndex, prevPrefexOffset = 0;
-        ch = fgetc( pFile );
-        while( ch != EOF ){
-            prefixTwo = "";
-
-            if( !((ch>=65&&ch<=90) || (ch>=97&&ch<=122)) ){  // ' ' or A-Z or a-z
-                twoChar = false;
-                count += 1;
-                ch = fgetc( pFile );
-                previous = -1;  //seems like useless
-                continue;
-            }
-
-            ch = tolower( ch );    //case insensitive
-            if( twoChar == false ){
-                twoChar = true;
-                previous = ch;
-                count += 1;
-                ch = fgetc( pFile );
-                continue;
-            }
-
-            prefixTwo += previous;
-            prefixTwo += ch;
-            prefixIndex = prefixToIndex( prefixTwo );
-            prevPrefexOffset = previousOffset[prefixIndex];
-            if( ((count-1) - prevPrefexOffset) >= gap ){    //If the gap between this prefix string is larger than expected, than store from->to
-                statHarry[ prefixIndex ][ fileIndex ][ prevPrefexOffset ] = count - 1;
-            }
-            previousOffset[ prefixIndex ] = count - 1;
-
-            previous = ch;
-            count += 1;
-            ch = fgetc( pFile );
-        }
-
-        for( int k=0; k<676; k++ ){
-            prevPrefexOffset = previousOffset[ k ];
-            if( prevPrefexOffset != -1 ){
-                statHarry[ k ][ fileIndex ][ prevPrefexOffset ] = count - 1;  //keep track of skip pointer from previous to the end file offset
-            }
-        }
-
-        fclose( pFile );
-    }
-//    return invertedIndex;
-}
-
-
 
 int main( int argc, char *argv[] ) {
+    block = 2;
+
     string pathName( argv[1] );
     vector<string> files;
 
     //files = getAllFilesWin( pathName );          //Windows
     files = getAllFilesLinux( pathName );          //Linux
 
-    vector<string> keywords;
-    for(int i=2; i<argc; i++){
-        string keyword = argv[i];
-//        transform( keyword.begin(), keyword.end(), keyword.begin(), ::tolower);  // transfer to lowercase for each keyword/phrase/substring
-        keywords.push_back( keyword );
+    vector<string> patterns;
+    shortestLen = 256;
+
+    int begin;
+    string arg( argv[3] );
+    if( arg == "-s" ) begin = 5;
+    else begin = 3;
+    for(int i=begin; i<argc; i++){
+        string pattern = argv[i];
+        int patLen = pattern.length();
+        transform( pattern.begin(), pattern.end(), pattern.begin(), ::tolower);  // transfer to lowercase for each pattern
+        patterns.push_back( pattern );
+        if( patLen < shortestLen ) shortestLen = patLen; // get the shortest length of the patters for the preprocessing and searching
     }
-    //keywords.push_back( argv[2] );
-    /******* Split the phrase ********/
-//    for( int i=2; i<argc; i++){
-//        vector<string> subArgs = split( argv[i], ' ' );
-//        keywords.insert( keywords.end(), subArgs.begin(), subArgs.end() );
-//    }
-    /******* Split the phrase ********/
+    int patternNum = patterns.size();
 
-    /******* Inverted index ********/
-    //map<string, map<int, vector<int> > > invertedIndex = preprocFiles( files, pathName );
-    //cout << invertedIndex.size() << endl;
-    /******* Inverted Index ********/
-
-    /******* Skip pointer *********/
-    // Shawn
-//    statShawn = new map<int, int> *[files.size()];
-//    for (int i = 0; i < files.size(); i++) {
-//        statShawn[i] = new map<int, int>[676]();
-//    }
-//    skipPointerBuildShawn( files, pathName, 10000 );
-//    for(int j=0; j<files.size(); j++){
-//        for(int k=0; k<676; k++){
-//            string prefixTwo = indexToPrefix( k );
-//            cout << prefixTwo << " : ";
-//            map<int, int> test = stat[j][k];
-//            map<int, int>::iterator iter;
-//            for( iter=test.begin(); iter != test.end(); iter++ ){
-//                cout << iter->first << " TO " << iter->second << " ; ";
-//            }
-//            cout << endl;
-//        }
-//    }
-
-    //Harry
-//    statHarry = new map<int, int> *[676];
-//    for (int i = 0; i < 676; i++) {
-//        statHarry[i] = new map<int, int>[files.size()];
-//    }
-//    skipPointerBuildHarry( files, pathName, 10000 );
-//    for(int j=0; j<676; j++){
-//        string prefixTwo = indexToPrefix( j );
-//        //cout << prefixTwo << " : " << endl;
-//        for(int k=0; k<files.size(); k++){
-//            //cout << "filename " << files[k] << " : ";
-//            map<int, int> test = statHarry[j][k];
-//            if( test.size() == 0 ){
-//                //cout << "No such prefix word " << prefixTwo;
-//            }else{
-//                map<int, int>::iterator iter;
-//                for( iter=test.begin(); iter != test.end(); iter++ ){
-//                    cout << iter->first  << iter->second << " ; ";
-//                }
-//            }
-//            //cout << endl;
-//        }
-//    }
-
-    /******* Skip pointer *********/
-
-    /******* Sunday search ********/
-    sundaySearch( keywords, files, pathName );
-    /******* Sunday search ********/
+    /******* Wu Manber search algorithm ********/
+    BuildShiftTable( patterns );                                // preprocessing
+    wuManberSearch( patterns, files, pathName, patternNum );    // searching
+    freeResources();
+    /******* Wu Manber search algorithm ********/
 
     return 0;
 }
-
-
-// print two dimensional array which contains map
-//    for(int j=0; j<files.size(); j++){
-//        for(int k=0; k<676; k++){
-//            map<int, int> test = stat[j][k];
-//            map<int, int>::iterator iter;
-//            for( iter=test.begin(); iter != test.end(); iter++ ){
-//                cout << iter->first << " " << iter->second << endl;
-//            }
-//        }
-//    }
